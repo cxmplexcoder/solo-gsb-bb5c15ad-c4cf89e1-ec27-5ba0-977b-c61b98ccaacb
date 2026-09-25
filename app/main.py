@@ -17,6 +17,7 @@ from .anonymizer import (
     solve_levels,
     unprocessable,
 )
+from .geo import MAX_ZOOM_LIMIT, assign_cells, prepare_points
 from .intersection import audit_intersections
 
 API_PREFIX = "/api/v1"
@@ -29,8 +30,10 @@ app = FastAPI(
         "可选地要求每组包含至少 l 种不同的敏感属性值。"
         "另提供两次发布的关联风险审计：对同一批记录两次公开的"
         "分组按 id 求交集，标记成员数不足 k 的交集。"
+        "另提供坐标自适应网格匿名化：以全球经纬范围为根格递归四分，"
+        "仅当每个非空子格都至少有 k 条记录时才拆分，输出可发布的 z/x/y 格。"
     ),
-    version="1.1.0",
+    version="1.2.0",
 )
 
 
@@ -112,6 +115,52 @@ class AuditIntersectionResponse(BaseModel):
     risk_count: int
 
 
+class GeoAnonymizeRequest(BaseModel):
+    """坐标自适应网格匿名化请求体。"""
+
+    # 拒绝 bool 冒充整数；k 必须为正整数。
+    k: StrictInt = Field(..., description="每个发布格至少包含的记录数")
+    # 拒绝 bool 冒充整数；max_zoom 必须在 0～12 之间。
+    max_zoom: StrictInt = Field(..., description="最大拆分层级（0～12）")
+    records: list[dict[str, Any]] = Field(
+        ..., description="含 id、latitude、longitude 的野外观测记录"
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GeoAssignment(BaseModel):
+    """一条记录的最终发布格（仅 id 与 z/x/y，不回传原坐标）。"""
+
+    id: str
+    z: int
+    x: int
+    y: int
+
+
+class GeoCell(BaseModel):
+    """一个发布格：z/x/y、经纬边界与人数。"""
+
+    z: int
+    x: int
+    y: int
+    lat_min: float
+    lat_max: float
+    lon_min: float
+    lon_max: float
+    count: int
+
+
+class GeoAnonymizeResponse(BaseModel):
+    """坐标自适应网格匿名化结果。"""
+
+    records: list[GeoAssignment]
+    cells: list[GeoCell]
+    k: int
+    max_zoom: int
+    total_records: int
+
+
 @app.get("/")
 def root() -> dict[str, str]:
     """服务信息。"""
@@ -121,6 +170,7 @@ def root() -> dict[str, str]:
         "health": f"{API_PREFIX}/health",
         "anonymize": f"{API_PREFIX}/anonymize",
         "audit_intersection": f"{API_PREFIX}/audit-intersection",
+        "geo_anonymize": f"{API_PREFIX}/geo-anonymize",
     }
 
 
@@ -192,4 +242,39 @@ def audit_intersection(request: AuditIntersectionRequest) -> AuditIntersectionRe
         k=request.k,
         total_records=len(request.records_a),
         risk_count=sum(1 for item in intersections if item["at_risk"]),
+    )
+
+
+@app.post(
+    f"{API_PREFIX}/geo-anonymize",
+    response_model=GeoAnonymizeResponse,
+)
+def geo_anonymize(request: GeoAnonymizeRequest) -> GeoAnonymizeResponse:
+    """为观测坐标生成可发布的自适应网格：返回各 id 的最终格与发布格边界。"""
+    if request.k < 1:
+        raise unprocessable("k 必须是正整数（>= 1）")
+
+    if not 0 <= request.max_zoom <= MAX_ZOOM_LIMIT:
+        raise unprocessable(
+            f"max_zoom 必须是 0 到 {MAX_ZOOM_LIMIT} 之间的整数"
+        )
+
+    # 记录总数小于 k：根格（必然存在的发布格）不可能达到 k 条。
+    if len(request.records) < request.k:
+        raise unprocessable(
+            f"记录总数 {len(request.records)} 小于 k={request.k}，无法满足 k-匿名"
+        )
+
+    ids, lats, lons = prepare_points(request.records)
+    assignments, cells = assign_cells(lats, lons, request.k, request.max_zoom)
+
+    return GeoAnonymizeResponse(
+        records=[
+            GeoAssignment(id=obs_id, z=z, x=x, y=y)
+            for obs_id, (z, x, y) in zip(ids, assignments)
+        ],
+        cells=[GeoCell(**cell) for cell in cells],
+        k=request.k,
+        max_zoom=request.max_zoom,
+        total_records=len(request.records),
     )
