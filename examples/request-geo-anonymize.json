@@ -1,0 +1,14 @@
+{
+  "k": 2,
+  "max_zoom": 3,
+  "records": [
+    {"id": "obs-001", "latitude": 31.5, "longitude": 121.0, "species": "震旦鸦雀"},
+    {"id": "obs-002", "latitude": 32.0, "longitude": 121.5, "species": "震旦鸦雀"},
+    {"id": "obs-003", "latitude": 30.5, "longitude": 120.5, "species": "白头鹤"},
+    {"id": "obs-004", "latitude": 31.0, "longitude": 122.0, "species": "白头鹤"},
+    {"id": "obs-005", "latitude": 45.0, "longitude": 126.0, "species": "丹顶鹤"},
+    {"id": "obs-006", "latitude": 44.5, "longitude": 125.5, "species": "丹顶鹤"},
+    {"id": "obs-007", "latitude": -33.9, "longitude": 151.2, "species": "笑翠鸟"},
+    {"id": "obs-008", "latitude": -33.5, "longitude": 151.0, "species": "笑翠鸟"}
+  ]
+}

@@ -7,6 +7,10 @@
 调用方还可可选地同时提供敏感属性字段名与正整数 **l**，追加 **l-多样性**约束：
 每个发布分组中不同的敏感值种数至少为 **l**。
 
+也可直接提交观测**坐标**（经纬度）：服务以全球经纬范围为根格递归四分，
+仅在每个非空子格都满足 k-匿名时才继续拆分，生成可发布的**自适应网格**，
+只回传每条记录所属的 `z/x/y` 格编号与各发布格的边界、人数，不公开原始坐标。
+
 服务为纯内存、无状态处理：**原始记录不写日志、不落盘、不挂载数据卷**。
 
 ## 一条命令启动
@@ -20,6 +24,7 @@ docker compose up --build
 - API 地址与端口：`http://localhost:8000`
 - 匿名化接口：`POST http://localhost:8000/api/v1/anonymize`
 - 两次发布关联风险审计接口：`POST http://localhost:8000/api/v1/audit-intersection`
+- 坐标自适应网格匿名化接口：`POST http://localhost:8000/api/v1/geo-anonymize`
 - 健康检查：`GET http://localhost:8000/api/v1/health`
 - 交互式文档（Swagger UI）：`http://localhost:8000/docs`
 
@@ -264,6 +269,103 @@ curl -s http://localhost:8000/api/v1/audit-intersection \
 - id 在批内不唯一，或两批 id 集合不一致（错误信息列出差异 id）；
 - 分组字段名为空或在同一列表中重复；
 - 某条记录缺少分组字段，或分组字段值不是字符串；
+- 请求体缺少必填字段或出现未声明字段。
+
+## 坐标自适应网格匿名化
+
+`POST /api/v1/geo-anonymize`，`Content-Type: application/json`。
+
+直接发布精确观测坐标会泄露物种栖息地位置。本接口把坐标归入**自适应
+四分网格**：以全球经纬范围（经度 -180～180、纬度 -90～90）为根格，按
+经纬中点递归四分，**仅当当前格的每个非空子格都至少有 k 条记录时**才
+拆分，否则整格停止，最多拆到 `max_zoom` 层。响应只包含每条记录的最终
+格编号 `z/x/y` 与各发布格的经纬边界和人数，**不回传原始坐标或其他原
+字段**。
+
+### 请求格式
+
+```json
+{
+  "k": 2,
+  "max_zoom": 3,
+  "records": [
+    {"id": "obs-001", "latitude": 31.5, "longitude": 121.0, "species": "震旦鸦雀"},
+    {"id": "obs-005", "latitude": 45.0, "longitude": 126.0, "species": "丹顶鹤"},
+    {"id": "obs-007", "latitude": -33.9, "longitude": 151.2, "species": "笑翠鸟"}
+  ]
+}
+```
+
+- `k`：正整数，每个发布格至少包含的记录数。
+- `max_zoom`：**0～12** 的整数，最大拆分层级；`0` 表示全部记录并入
+  全球根格。
+- `records`：观测记录数组，每条必须包含：
+  - `id`：**非空字符串**，且在批内**唯一**；
+  - `latitude`：**有限数值**，-90～90（边界值合法）；
+  - `longitude`：**有限数值**，-180～180（边界值合法）。
+
+  其余字段（如示例中的 `species`）允许提交，但不会被返回。
+
+### 拆分规则
+
+1. 根格 `z=0/x=0/y=0` 覆盖全球；`x` 自西向东、`y` 自北向南编号，
+   z 层共有 `2^z × 2^z` 个格；
+2. 拆分当前格时按经度中点、纬度中点分出 4 个子格；**落在边界上的点
+   归入最北或最东的子格**（纬度等于中点归北，经度等于中点归东）；
+3. 仅当 4 个子格中**每个非空子格**的记录数都 `>= k` 时才真正拆分，
+   否则当前格整体成为发布格；空子格不参与判断；
+4. 层级达到 `max_zoom` 的格不再拆分；
+5. 记录总数 `< k` 时返回 422（任何发布格都不可能达到 k）。
+
+### 响应格式
+
+以 `examples/request-geo-anonymize.json`（8 条记录，`k=2`，
+`max_zoom=3`）为例：北半球 6 条在 z=1 整格停止（继续拆会分出只含
+1 条的子格），悉尼 2 条同格一路拆到 `max_zoom`：
+
+```json
+{
+  "assignments": [
+    {"id": "obs-001", "z": 1, "x": 1, "y": 0},
+    {"id": "obs-007", "z": 3, "x": 7, "y": 5}
+  ],
+  "cells": [
+    {"z": 1, "x": 1, "y": 0,
+     "min_latitude": 0.0, "max_latitude": 90.0,
+     "min_longitude": 0.0, "max_longitude": 180.0,
+     "count": 6},
+    {"z": 3, "x": 7, "y": 5,
+     "min_latitude": -45.0, "max_latitude": -22.5,
+     "min_longitude": 135.0, "max_longitude": 180.0,
+     "count": 2}
+  ],
+  "k": 2,
+  "max_zoom": 3,
+  "total_records": 8
+}
+```
+
+- `assignments`：与输入**等长、等序**，每条仅含 `id` 与最终格
+  `z/x/y`；
+- `cells`：各发布格的 `z/x/y`、经纬边界与记录数，按格内记录在输入中
+  **首次出现的顺序**排列；每个发布格的 `count` 必然 `>= k`。
+
+```bash
+curl -s http://localhost:8000/api/v1/geo-anonymize \
+  -H 'Content-Type: application/json' \
+  --data @examples/request-geo-anonymize.json
+```
+
+### 网格接口的 422 校验
+
+以下情况返回 HTTP `422 Unprocessable Entity`（请求体结构错误同样为
+422），错误说明在响应体 `detail` 中：
+
+- `k` 不是正整数（含 `0`、负数、布尔值、非整数），或记录总数小于 `k`；
+- `max_zoom` 不是 0～12 的整数（含布尔值、非整数）；
+- 记录缺少 id、id 不是非空字符串，或 id 在批内重复；
+- 记录缺少 `latitude` / `longitude`，值不是有限数值（布尔、字符串、
+  `NaN`、无穷均非法），或超出 -90～90 / -180～180 范围；
 - 请求体缺少必填字段或出现未声明字段。
 
 ## 422 校验错误
